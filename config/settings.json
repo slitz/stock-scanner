@@ -1,0 +1,5 @@
+{
+    "average_price_period_in_days": 20,
+    "bollinger_bands_period_in_days": 20,
+    "rsi_period_in_days": 14
+}

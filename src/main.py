@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import List, Dict, Any
@@ -12,12 +13,22 @@ from .indicators import (
     scan_for_opportunities,
 )
 
+def load_config(config_file: str = "config/settings.json") -> dict:
+    try:
+        with open(config_file, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Config file not found: {config_file}")
+        print("Please create config/settings.json with your API key and exchange codes")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"Invalid JSON in config file: {config_file}")
+        sys.exit(1)
 
 def _resolve_data_file() -> Path:
     """Return the path to the prices.csv data file."""
     base_dir = Path(__file__).resolve().parents[1]
     return base_dir / "data" / "prices.csv"
-
 
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Calculate average close and Bollinger Bands for a stock")
@@ -26,6 +37,12 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--rsi", action="store_true", help="Also print Relative Strength Index (14-day)")
     parser.add_argument("--scan", action="store_true", help="Scan all stocks for oversold opportunities (latest close < lower band AND RSI < 30)")
     args = parser.parse_args(argv)
+
+    # Load configuration
+    config = load_config("config/settings.json")
+    AVERAGE_PRICE_PERIOD = config.get("average_price_period_in_days")
+    BOLLINGER_BANDS_PERIOD = config.get("bollinger_bands_period_in_days")
+    RSI_PERIOD = config.get("rsi_period_in_days")
 
     data_file = _resolve_data_file()
     if not data_file.exists():
@@ -39,7 +56,7 @@ def main(argv: List[str] | None = None) -> int:
         return 3
 
     if args.scan:
-        opportunities = scan_for_opportunities(data)
+        opportunities = scan_for_opportunities(data, BOLLINGER_BANDS_PERIOD, RSI_PERIOD)
         if not opportunities:
             print("No oversold opportunities found (price below lower band AND RSI < 30)")
             return 0
@@ -55,7 +72,7 @@ def main(argv: List[str] | None = None) -> int:
         parser.print_help()
         return 1
 
-    avg = calculate_average_price(args.symbol, data)
+    avg = calculate_average_price(args.symbol, data, AVERAGE_PRICE_PERIOD)
     if avg == 0.0:
         print(f"No data for symbol: {args.symbol}")
         return 0
@@ -65,16 +82,15 @@ def main(argv: List[str] | None = None) -> int:
     print(f"Average: ${avg:.2f}")
 
     if args.bands:
-        bands = calculate_bollinger_bands(args.symbol, data)
+        bands = calculate_bollinger_bands(args.symbol, data, BOLLINGER_BANDS_PERIOD)
         print(f"Lower Band: ${bands['lower']:.2f}")
         print(f"Upper Band: ${bands['upper']:.2f}")
 
     if args.rsi:
-        rsi = calculate_rsi(args.symbol, data)
+        rsi = calculate_rsi(args.symbol, data, RSI_PERIOD)
         print(f"RSI (14): {rsi:.2f}")
 
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

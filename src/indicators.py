@@ -4,7 +4,7 @@ import csv
 from pathlib import Path
 
 
-def calculate_average_price(symbol: str, data: List[Dict[str, Any]]) -> float:
+def calculate_average_price(symbol: str, data: List[Dict[str, Any]], period: int) -> float:
     """Return the average closing price for `symbol` using entries in `data`.
     Returns 0.0 when no matching prices are found."""
     prices: List[float] = []
@@ -18,11 +18,12 @@ def calculate_average_price(symbol: str, data: List[Dict[str, Any]]) -> float:
 
     if not prices:
         return 0.0
+    
+    recent_prices = prices[-period:]
 
-    return sum(prices) / len(prices)
+    return sum(recent_prices) / period
 
-
-def calculate_bollinger_bands(symbol: str, data: List[Dict[str, Any]]) -> Dict[str, float]:
+def calculate_bollinger_bands(symbol: str, data: List[Dict[str, Any]], period: int) -> Dict[str, float]:
     """Calculate Bollinger Bands (population std dev) for `symbol` over provided `data`.
 
     Returns a dict with keys: `average`, `std_dev`, `upper`, `lower`.
@@ -40,8 +41,10 @@ def calculate_bollinger_bands(symbol: str, data: List[Dict[str, Any]]) -> Dict[s
     if not prices:
         return {"average": 0.0, "std_dev": 0.0, "upper": 0.0, "lower": 0.0}
 
-    avg = sum(prices) / len(prices)
-    variance = sum((p - avg) ** 2 for p in prices) / len(prices)  # population variance
+    recent_prices = prices[-period:]
+
+    avg = sum(recent_prices) / period
+    variance = sum((p - avg) ** 2 for p in recent_prices) / period  # population variance
     std_dev = math.sqrt(variance)
     band_width = 2 * std_dev
     upper = avg + band_width
@@ -81,51 +84,80 @@ def get_latest_close(symbol: str, data: List[Dict[str, Any]]) -> float:
 
     return 0.0
 
+def calculate_rsi(symbol: str, data: List[Dict[str, Any]], period: int) -> float:
+    """Calculate the Relative Strength Index (RSI) for `symbol` using Wilder's smoothing.
 
-def calculate_rsi(symbol: str, data: List[Dict[str, Any]], period: int = 14) -> float:
-    """Calculate the Relative Strength Index (RSI) for `symbol` over the preceding `period` trading days.
-    
-    RSI = 100 * (avg_gains / (avg_gains + avg_losses))
-    
+    RSI = 100 - 100 / (1 + RS), where
+    RS = smoothed_avg_gain / smoothed_avg_loss
+
+    Wilder's smoothing is a recursive average:
+      avg_gain_t = (avg_gain_{t-1} * (period - 1) + gain_t) / period
+      avg_loss_t = (avg_loss_{t-1} * (period - 1) + loss_t) / period
+
     Returns 0.0 if insufficient data or no data for symbol.
+    Preserves prior behavior for edge cases:
+      - If avg_loss == 0 and avg_gain > 0 => 100.0
+      - If avg_loss == 0 and avg_gain == 0 => 0.0
     """
-    prices: List[float] = []
-    for entry in data:
-        if entry.get("symbol") == symbol and "close" in entry:
-            try:
-                prices.append(float(entry["close"]))
-            except (TypeError, ValueError):
-                continue
 
-    if len(prices) < period + 1:
-        # Need at least period + 1 prices to calculate period changes
+    # Collect rows for the symbol and (optionally) sort if a 'date' field is present.
+    rows = [entry for entry in data if entry.get("symbol") == symbol and "close" in entry]
+    if not rows:
         return 0.0
 
-    # Get the last period + 1 prices to calculate period changes
-    recent_prices = prices[-(period + 1):]
+    # If a sortable 'date' key exists, sort by it to be safe; otherwise assume input is chronological.
+    try:
+        rows.sort(key=lambda x: x.get("date"))
+    except Exception:
+        pass
 
-    # Calculate gains and losses
-    gains = []
-    losses = []
-    for i in range(1, len(recent_prices)):
+    # Extract/clean closes
+    prices: List[float] = []
+    for entry in rows:
+        try:
+            prices.append(float(entry["close"]))
+        except (TypeError, ValueError):
+            continue
+
+    # Need at least period + 1 prices to compute initial period changes
+    if len(prices) < period + 1:
+        return 0.0
+
+    # --- 1) Initial averages from the first `period` changes
+    recent_prices = prices[-(period + 1):]
+    gains: List[float] = []
+    losses: List[float] = []
+    for i in range(1, period + 1):        
         change = recent_prices[i] - recent_prices[i - 1]
         if change > 0:
             gains.append(change)
             losses.append(0.0)
         else:
             gains.append(0.0)
-            losses.append(abs(change))
+            losses.append(-change)  # positive loss magnitude
+            
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
 
-    avg_gain = sum(gains) / len(gains)
-    avg_loss = sum(losses) / len(losses)
+    # --- 2) Wilder smoothing over the rest of the series
+    for i in range(period + 1, len(prices)):
+        change = prices[i] - prices[i - 1]
+        gain = change if change > 0 else 0.0
+        loss = -change if change < 0 else 0.0
 
-    if avg_loss == 0:
-        # If there are no losses, RSI is 100
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        
+    # --- 3) Final RSI for the latest point
+    if avg_loss == 0.0:
+        # Preserve your previous convention:
+        #  - 100 if there are gains and no losses
+        #  - 0 if there are neither (flat) or gains==0
         return 100.0 if avg_gain > 0 else 0.0
 
-    rsi = 100.0 * (avg_gain / (avg_gain + avg_loss))
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi
-
 
 def load_data_from_csv(file_path: str) -> List[Dict[str, Any]]:
     p = Path(file_path)
@@ -137,7 +169,7 @@ def load_data_from_csv(file_path: str) -> List[Dict[str, Any]]:
     return data
 
 
-def scan_for_opportunities(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def scan_for_opportunities(data: List[Dict[str, Any]], bollinger_bands_period: int, rsi_period: int) -> List[Dict[str, Any]]:
     """Scan all stocks in data and find those where:
     - Latest closing price is below the lower Bollinger Band
     - RSI (14-day) is below 30
@@ -154,8 +186,8 @@ def scan_for_opportunities(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     
     for symbol in sorted(symbols):
         latest_close = get_latest_close(symbol, data)
-        bands = calculate_bollinger_bands(symbol, data)
-        rsi = calculate_rsi(symbol, data)
+        bands = calculate_bollinger_bands(symbol, data, bollinger_bands_period)  # Use 20-day period for bands
+        rsi = calculate_rsi(symbol, data, rsi_period)
         
         # Check both conditions
         if latest_close > 0 and latest_close < bands["lower"] and rsi < 30:
